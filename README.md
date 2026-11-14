@@ -103,6 +103,17 @@ reconnects automatically on the next visit. Open the page in a normal browser ta
 panes (IDE webviews, in-app browsers) often block the WebHID device picker, so nothing appears when
 you press Connect.
 
+### Connecting over 2.4G
+
+The 2.4G receiver sleeps when the keyboard is idle, and that includes the very first handshake. If
+**Connect** ends with “No handshake from the keyboard”, the keyboard was still asleep:
+
+1. Press any key on the keyboard to wake the link.
+2. Press **Connect** again while it is awake.
+
+The picker lists the dongle as `87C 2.4G dongle` and the cable as `87C`. Wired USB answers
+immediately, so this step is only needed on the receiver.
+
 ## Browser support
 
 WebHID exists in Chrome, Edge and Opera on desktop. Firefox and Safari can open the page and use
@@ -116,8 +127,9 @@ the key tester, but cannot reach the lighting controls. Demo mode is available e
   panel strip). Channels 0, 1, 4 and 5 timed out or stayed silent, so they are never contacted.
 - The firmware answers **one step below** the value that was written for brightness (send `100`,
   read `99`). This app treats the readback as confirmation and shows the real value in **Device**.
-- The 2.4G receiver sleeps when idle, so a request can time out. Press any key on the keyboard and
-  retry; the app explains this instead of failing silently.
+- The 2.4G receiver sleeps when idle, so a request — including the first handshake after **Connect** —
+  can time out. Press any key on the keyboard and retry; the app explains this instead of failing
+  silently.
 
 Effect names, ids and channel layout come from the community VIA definition
 [`trananhmanh89/weikav-wk87-via-json`](https://github.com/trananhmanh89/weikav-wk87-via-json).
