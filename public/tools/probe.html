@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WK87 probe (read-only)</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --paper: #f7f3ec;
+        --ink: #2b2724;
+        --muted: #7a7268;
+        --line: #e2d9cb;
+        --accent: #b4553c;
+        --card: #fffdf9;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #1d1a18;
+          --ink: #f0e9df;
+          --muted: #a79c8f;
+          --line: #3a342f;
+          --accent: #d9825f;
+          --card: #262220;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 32px 20px 60px;
+        background: var(--paper);
+        color: var(--ink);
+        font: 15px/1.55 "Segoe UI", system-ui, sans-serif;
+      }
+      main { max-width: 860px; margin: 0 auto; }
+      h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: -0.02em; }
+      p { color: var(--muted); margin: 0 0 14px; }
+      .row { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
+      button {
+        font: inherit;
+        padding: 9px 16px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--ink);
+        cursor: pointer;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      pre {
+        margin: 0;
+        padding: 16px;
+        min-height: 220px;
+        max-height: 460px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--card);
+        font: 12.5px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+        white-space: pre-wrap;
+      }
+      .note {
+        border-left: 3px solid var(--accent);
+        padding: 8px 12px;
+        color: var(--ink);
+        background: var(--card);
+        border-radius: 0 8px 8px 0;
+        margin: 0 0 18px;
+      }
+      code { font-family: ui-monospace, Consolas, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>WK87 probe</h1>
+      <p>Read-only diagnostics. This page never sends a write command (0x07).</p>
+
+      <div class="note">
+        <strong>What it does:</strong> reads lighting values (<code>0x08</code>) from channels 0-5,
+        reads HID feature reports, and listens for unsolicited reports. It never sends a write
+        command. Two questions: does the side panel live on its own lighting channel, and does the
+        firmware report battery anywhere. Run it once on the cable and once on the 2.4G receiver.
+      </div>
+
+      <div class="row">
+        <button id="connect" class="primary">Connect</button>
+        <button id="scan" disabled>Scan lighting channels</button>
+        <button id="battery" disabled>Hunt battery values</button>
+        <button id="listen" disabled>Listen 15s</button>
+        <button id="features" disabled>Read feature reports</button>
+        <button id="copy" disabled>Copy results</button>
+      </div>
+
+      <pre id="log">Not connected. Press Connect and pick the device named "87C" or "87C 2.4G dongle".</pre>
+    </main>
+
+    <script>
+      const VENDOR_ID = 0x342d
+      const PRODUCT_ID = 0xe406
+      const VENDOR_USAGE_PAGE = 0xff60
+      const VENDOR_USAGE = 0x61
+      const REPORT_ID = 0
+      const REPORT_SIZE = 32
+      const TIMEOUT_MS = 900
+
+      const log = document.getElementById('log')
+      const connectButton = document.getElementById('connect')
+      const scanButton = document.getElementById('scan')
+      const batteryButton = document.getElementById('battery')
+      const listenButton = document.getElementById('listen')
+      const featureButton = document.getElementById('features')
+      const copyButton = document.getElementById('copy')
+
+      let device = null
+
+      const write = (line) => {
+        log.textContent += '\n' + line
+        log.scrollTop = log.scrollHeight
+      }
+
+      const reset = (line) => {
+        log.textContent = line
+      }
+
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+      const hex = (bytes) =>
+        Array.from(bytes)
+          .map((value) => value.toString(16).toUpperCase().padStart(2, '0'))
+          .join(' ')
+
+      function normalise(event) {
+        const bytes = new Uint8Array(
+          event.data.buffer,
+          event.data.byteOffset,
+          event.data.byteLength,
+        ).slice()
+        if (bytes.length > 1 && bytes[0] === event.reportId) return bytes.slice(1)
+        return bytes
+      }
+
+      /** One 0x08 read. Matches the channel/id echo so a late reply cannot fool it. */
+      function readValue(channel, id) {
+        const payload = new Uint8Array(REPORT_SIZE)
+        payload[0] = 0x08
+        payload[1] = channel
+        payload[2] = id
+
+        return new Promise((resolve, reject) => {
+          let settled = false
+          const finish = (fn, value) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            device.removeEventListener('inputreport', onReport)
+            fn(value)
+          }
+          const timer = setTimeout(() => finish(reject, new Error('timeout')), TIMEOUT_MS)
+          function onReport(event) {
+            const data = normalise(event)
+            if (data[0] !== 0x08) return
+            if (data[1] !== channel || data[2] !== id) return
+            finish(resolve, data)
+          }
+          device.addEventListener('inputreport', onReport)
+          device.sendReport(REPORT_ID, payload).catch((error) => finish(reject, error))
+        })
+      }
+
+      connectButton.addEventListener('click', async () => {
+        try {
+          const devices = await navigator.hid.requestDevice({
+            filters: [
+              {
+                vendorId: VENDOR_ID,
+                productId: PRODUCT_ID,
+                usagePage: VENDOR_USAGE_PAGE,
+                usage: VENDOR_USAGE,
+              },
+            ],
+          })
+          device = devices[0]
+          if (!device) {
+            write('No device selected.')
+            return
+          }
+          if (!device.opened) await device.open()
+          reset(
+            [
+              'Connected.',
+              'Product: ' + (device.productName || '(no name)'),
+              'VID/PID: ' + device.vendorId.toString(16) + ':' + device.productId.toString(16),
+              'Collections: ' + (device.collections ? device.collections.length : 0),
+              '',
+              'Press "Scan lighting channels" and leave the keyboard alone until it finishes.',
+              'If the page starts reporting timeouts, press a key on the keyboard once.',
+              '',
+              'For the battery question: press "Hunt battery values", then "Read feature reports",',
+              'then "Listen 15s" while typing. Repeat all of it on the 2.4G dongle if you can.',
+            ].join('\n'),
+          )
+          scanButton.disabled = false
+          batteryButton.disabled = false
+          listenButton.disabled = false
+          featureButton.disabled = false
+          copyButton.disabled = false
+        } catch (error) {
+          reset('Connect failed: ' + (error && error.message ? error.message : error))
+        }
+      })
+
+      scanButton.addEventListener('click', async () => {
+        scanButton.disabled = true
+        scanButton.textContent = 'Scanning...'
+        write('')
+        write('-- lighting values (0x08), channels 0-5, ids 1-8')
+        for (let channel = 0; channel <= 5; channel += 1) {
+          for (let id = 1; id <= 8; id += 1) {
+            try {
+              const data = await readValue(channel, id)
+              write(
+                'ch ' +
+                  channel +
+                  ' id ' +
+                  id +
+                  '  ->  [' +
+                  Array.from(data.slice(3, 11)).join(', ') +
+                  ']   raw: ' +
+                  hex(data),
+              )
+            } catch (error) {
+              write('ch ' + channel + ' id ' + id + '  ->  ' + (error.message || error))
+              if (error.message === 'timeout') {
+                write('   (timeout: press a key on the keyboard, then continue with the next row)')
+              }
+            }
+            await sleep(120)
+          }
+        }
+        write('-- done')
+        scanButton.disabled = false
+        scanButton.textContent = 'Scan lighting channels'
+      })
+
+      batteryButton.addEventListener('click', async () => {
+        batteryButton.disabled = true
+        batteryButton.textContent = 'Hunting...'
+        write('')
+        write('-- battery hunt: channel 0, ids 1-32 (any non-zero row is a candidate)')
+        for (let id = 1; id <= 32; id += 1) {
+          try {
+            const data = await readValue(0, id)
+            const values = Array.from(data.slice(3, 11))
+            const nonZero = values.some((value) => value !== 0)
+            write(
+              'ch 0 id ' +
+                id +
+                '  ->  [' +
+                values.join(', ') +
+                ']' +
+                (nonZero ? '   <-- non-zero, possible battery field' : ''),
+            )
+          } catch (error) {
+            write('ch 0 id ' + id + '  ->  ' + (error.message || error))
+          }
+          await sleep(80)
+        }
+        write('-- channel 0 done. Now press "Read feature reports" too.')
+        batteryButton.disabled = false
+        batteryButton.textContent = 'Hunt battery values'
+      })
+
+      listenButton.addEventListener('click', async () => {
+        listenButton.disabled = true
+        listenButton.textContent = 'Listening...'
+        write('')
+        write('-- listening for 15 seconds. Type on the keyboard and press a few Fn combinations.')
+        const seen = new Map()
+        const onReport = (event) => {
+          const bytes = normalise(event)
+          const key = hex(bytes.slice(0, 12))
+          const count = (seen.get(key) || 0) + 1
+          seen.set(key, count)
+          if (count <= 3) write('report  ->  ' + hex(bytes))
+        }
+        device.addEventListener('inputreport', onReport)
+        await sleep(15000)
+        device.removeEventListener('inputreport', onReport)
+        write('-- ' + seen.size + ' distinct report(s) seen. Rows not starting with 08 are unsolicited.')
+        listenButton.disabled = false
+        listenButton.textContent = 'Listen 15s'
+      })
+
+      featureButton.addEventListener('click', async () => {
+        featureButton.disabled = true
+        featureButton.textContent = 'Reading...'
+        write('')
+        write('-- HID feature reports 1-16 (vendor collection)')
+        for (let id = 1; id <= 16; id += 1) {
+          try {
+            const view = await device.receiveFeatureReport(id)
+            const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+            write('feature ' + id + '  ->  ' + hex(bytes.slice(0, 24)))
+          } catch (error) {
+            write('feature ' + id + '  ->  ' + (error.message || error))
+          }
+          await sleep(120)
+        }
+        write('-- done')
+        featureButton.disabled = false
+        featureButton.textContent = 'Read feature reports'
+      })
+
+      copyButton.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(log.textContent)
+          copyButton.textContent = 'Copied'
+          setTimeout(() => (copyButton.textContent = 'Copy results'), 1500)
+        } catch (error) {
+          write('Copy failed: ' + (error.message || error))
+        }
+      })
+    </script>
+  </body>
+</html>
