@@ -1,7 +1,8 @@
+import { useState } from 'react'
 import { CopyButton } from '../components/CopyButton'
 import { effectById } from '../core/effects'
 import { BLOCKED, LIGHTING_CHANNELS, VENDOR_ID, PRODUCT_ID, type LightingTarget } from '../core/protocol'
-import type { DeviceDescriptor } from '../core/types'
+import type { DeviceDescriptor, Lighting } from '../core/types'
 import type { LightingController } from '../hooks/useLighting'
 import type { PresetStore } from '../hooks/usePresets'
 
@@ -26,24 +27,64 @@ const TRANSPORT_LABEL: Record<string, string> = {
   demo: 'Demo (simulated)',
 }
 
+function ZoneReadbackTable({ label, values }: { label: string; values: Lighting }) {
+  const effect = effectById(values.effect)
+  return (
+    <div className="zone-readback">
+      <h4>{label}</h4>
+      <dl className="spec spec-tight">
+        <div>
+          <dt>Brightness</dt>
+          <dd>
+            {values.brightness} <span className="muted">/ 255</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Effect</dt>
+          <dd>
+            {effect.name} <span className="muted">#{values.effect}</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Speed</dt>
+          <dd>{values.speed}</dd>
+        </div>
+        <div>
+          <dt>Color</dt>
+          <dd>
+            <code>
+              H {values.hue} S {values.saturation} V {values.value}
+            </code>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  )
+}
+
 export function DevicePage({
   descriptor,
   connected,
   connecting,
   controller,
   presets,
-  lightTarget,
   onConnect,
   onDemo,
   onDisconnect,
 }: DevicePageProps) {
-  const values = controller.echo ?? controller.lighting
-  const effect = effectById(values.effect)
+  const [pinging, setPinging] = useState(false)
+  const [pingResult, setPingResult] = useState<number | null>(null)
+
+  const keyValues = controller.echoZones.keys ?? controller.zones.keys
+  const sideValues = controller.echoZones.side ?? controller.zones.side
   const transport = descriptor ? (TRANSPORT_LABEL[descriptor.transport] ?? descriptor.transport) : '—'
-  const readbackLabel =
-    lightTarget === 'side'
-      ? `Channel ${LIGHTING_CHANNELS.side} · side panel`
-      : `Channel ${LIGHTING_CHANNELS.keys} · key backlight`
+
+  const runPing = async () => {
+    setPinging(true)
+    const ms = await controller.ping()
+    setPingResult(ms)
+    setPinging(false)
+  }
 
   return (
     <div className="page">
@@ -96,6 +137,16 @@ export function DevicePage({
             <dd>{descriptor ? descriptor.collections : '—'}</dd>
           </div>
           <div>
+            <dt>Last HID latency</dt>
+            <dd>
+              {pingResult !== null
+                ? `${pingResult} ms (0x01 ping)`
+                : controller.lastLatencyMs !== null
+                  ? `${controller.lastLatencyMs} ms`
+                  : '—'}
+            </dd>
+          </div>
+          <div>
             <dt>Battery</dt>
             <dd>
               Not reported <span className="muted">(no battery device in Windows)</span>
@@ -107,7 +158,15 @@ export function DevicePage({
           {connected ? (
             <>
               <button type="button" className="btn btn-quiet" onClick={controller.refresh}>
-                Read lighting again
+                Read both channels
+              </button>
+              <button
+                type="button"
+                className="btn btn-quiet"
+                disabled={pinging}
+                onClick={runPing}
+              >
+                {pinging ? 'Pinging…' : 'Ping latency (0x01)'}
               </button>
               <button type="button" className="btn btn-quiet" onClick={onDisconnect}>
                 Disconnect
@@ -123,46 +182,33 @@ export function DevicePage({
               </button>
             </>
           )}
+          <a className="btn btn-quiet" href="./tools/probe.html" target="_blank" rel="noreferrer">
+            Open read-only probe
+          </a>
         </div>
       </section>
 
       <div className="page-columns">
         <section className="card">
           <div className="card-head">
-            <h3>Lighting readback</h3>
-            <span className="muted small">{readbackLabel}</span>
+            <h3>Dual-zone readback</h3>
+            <span className="muted small">Channels {LIGHTING_CHANNELS.keys} &amp; {LIGHTING_CHANNELS.side}</span>
           </div>
           {connected ? (
-            <dl className="spec spec-tight">
-              <div>
-                <dt>Brightness</dt>
-                <dd>
-                  {values.brightness} <span className="muted">/ 255</span>
-                </dd>
-              </div>
-              <div>
-                <dt>Effect</dt>
-                <dd>
-                  {effect.name} <span className="muted">#{values.effect}</span>
-                </dd>
-              </div>
-              <div>
-                <dt>Speed</dt>
-                <dd>{values.speed}</dd>
-              </div>
-              <div>
-                <dt>Color</dt>
-                <dd>
-                  <code>
-                    H {values.hue} S {values.saturation} V {values.value}
-                  </code>
-                </dd>
-              </div>
-            </dl>
+            <div className="dual-readback">
+              <ZoneReadbackTable
+                label={`Channel ${LIGHTING_CHANNELS.keys} · Key backlight`}
+                values={keyValues}
+              />
+              <ZoneReadbackTable
+                label={`Channel ${LIGHTING_CHANNELS.side} · Side panel`}
+                values={sideValues}
+              />
+            </div>
           ) : (
-            <p className="muted small">Connect the keyboard to read its four lighting values.</p>
+            <p className="muted small">Connect the keyboard to read lighting values from both channels.</p>
           )}
-          <p className="muted small">
+          <p className="muted small note-gap">
             The firmware answers one step below the value that was written for brightness (send 100,
             read 99). That is a firmware quirk, not a failed write, so this app treats the readback as
             confirmation rather than a correction.

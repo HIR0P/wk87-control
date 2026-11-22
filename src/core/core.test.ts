@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { hsvToCss, hsvToHex, hueDegrees } from './colors'
+import { COLOR_SWATCHES, hexToHsv, hsvToCss, hsvToHex, hueDegrees, rgbToHsv } from './colors'
+import { DemoClient } from './demo'
+import { KEY_SAMPLE_POINTS, buildSideSamplePoints, evaluateEffectRgb } from './effectEngine'
 import { EFFECTS, effectById } from './effects'
 import { keyLabel, locationName } from './keyLabels'
-import { BOARD_ROWS, BOARD_UNITS, KEY_COUNT } from './layout'
-import { parsePresets } from './presets'
+import { BOARD_KEYS, BOARD_ROWS, BOARD_UNITS, KEY_COUNT, TESTABLE_CODES, TESTABLE_KEY_COUNT } from './layout'
+import { STARTER_PRESETS, makePreset, parsePresets } from './presets'
 import { CMD, LIGHTING_CHANNELS, REPORT_SIZE, SAFE_COMMANDS, Wk87Error, assertAllowed, channelsFor, encodeCommand } from './protocol'
 
 describe('command encoding', () => {
@@ -71,6 +73,17 @@ describe('colors', () => {
     expect(hsvToHex(85, 255, 255)).toBe('#00ff00')
     expect(hueDegrees(255)).toBe(360)
   })
+
+  it('converts RGB and HEX back into firmware HSV bytes', () => {
+    expect(rgbToHsv(255, 0, 0)).toEqual([0, 255, 255])
+    expect(rgbToHsv(0, 255, 0)).toEqual([85, 255, 255])
+    expect(rgbToHsv(255, 255, 255)).toEqual([0, 0, 255])
+    expect(rgbToHsv(0, 0, 0)).toEqual([0, 0, 0])
+    expect(hexToHsv('#ff0000')).toEqual([0, 255, 255])
+    expect(hexToHsv('0f0')).toEqual([85, 255, 255])
+    expect(hexToHsv('not-a-color')).toBeNull()
+    expect(COLOR_SWATCHES.length).toBeGreaterThanOrEqual(8)
+  })
 })
 
 describe('board geometry', () => {
@@ -82,8 +95,14 @@ describe('board geometry', () => {
     }
   })
 
-  it('draws all 87 physical keys', () => {
+  it('draws all 87 physical keys with 86 unique browser-visible codes plus Fn', () => {
     expect(KEY_COUNT).toBe(87)
+    expect(BOARD_KEYS).toHaveLength(87)
+    expect(TESTABLE_KEY_COUNT).toBe(86)
+    expect(TESTABLE_CODES.size).toBe(86)
+    const firmwareKeys = BOARD_KEYS.filter((k) => k.hardwareOnly)
+    expect(firmwareKeys).toHaveLength(1)
+    expect(firmwareKeys[0].label).toBe('Fn')
   })
 })
 
@@ -97,10 +116,39 @@ describe('preset import', () => {
     ],
   }
 
-  it('accepts a bare array or an exported payload', () => {
+  const dualZone = {
+    app: 'wk87-control',
+    version: 2,
+    presets: [
+      {
+        name: 'Desk Pair',
+        scope: 'board',
+        lighting: { brightness: 180, effect: 1, speed: 40, hue: 20, saturation: 90, value: 255 },
+        sideLighting: { brightness: 150, effect: 5, speed: 60, hue: 12, saturation: 210, value: 240 },
+      },
+    ],
+  }
+
+  it('accepts a bare array, v1 export, or v2 dual-zone export', () => {
     expect(parsePresets(JSON.stringify(valid))).toHaveLength(1)
     expect(parsePresets(JSON.stringify(valid.presets))).toHaveLength(1)
-    expect(parsePresets(JSON.stringify(valid))?.[0].name).toBe('Evening')
+    expect(parsePresets(JSON.stringify(valid))?.[0].scope).toBe('zone')
+
+    const parsedDual = parsePresets(JSON.stringify(dualZone))
+    expect(parsedDual).toHaveLength(1)
+    expect(parsedDual?.[0].scope).toBe('board')
+    expect(parsedDual?.[0].sideLighting?.effect).toBe(5)
+  })
+
+  it('creates single-zone and board presets cleanly', () => {
+    const single = makePreset('One', valid.presets[0].lighting)
+    expect(single.scope).toBe('zone')
+    expect(single.sideLighting).toBeUndefined()
+
+    const board = makePreset('Two', dualZone.presets[0].lighting, dualZone.presets[0].sideLighting)
+    expect(board.scope).toBe('board')
+    expect(board.sideLighting).toEqual(dualZone.presets[0].sideLighting)
+    expect(STARTER_PRESETS.length).toBeGreaterThanOrEqual(4)
   })
 
   it('rejects unreadable files and entries without lighting', () => {
@@ -111,10 +159,81 @@ describe('preset import', () => {
 
   it('clamps values into the ranges the firmware accepts', () => {
     const [preset] = parsePresets(
-      JSON.stringify([{ name: 'hot', lighting: { ...valid.presets[0].lighting, effect: 99, brightness: 999 } }]),
+      JSON.stringify([
+        {
+          name: 'hot',
+          lighting: { ...valid.presets[0].lighting, effect: 99, brightness: 999 },
+          sideLighting: { ...valid.presets[0].lighting, effect: -5, brightness: 300 },
+        },
+      ]),
     ) ?? []
     expect(preset.lighting.effect).toBe(45)
     expect(preset.lighting.brightness).toBe(255)
+    expect(preset.sideLighting?.effect).toBe(0)
+    expect(preset.sideLighting?.brightness).toBe(255)
+  })
+})
+
+describe('demo client', () => {
+  it('tracks keys and side channels independently with off-by-one brightness readback', async () => {
+    const demo = new DemoClient()
+    await demo.writeLighting('keys', { brightness: 100, effect: 1 })
+    await demo.writeLighting('side', { brightness: 200, effect: 5 })
+    const zones = await demo.readAllZones()
+    expect(zones.keys.brightness).toBe(99)
+    expect(zones.keys.effect).toBe(1)
+    expect(zones.side.brightness).toBe(199)
+    expect(zones.side.effect).toBe(5)
+    const latency = await demo.ping()
+    expect(latency).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('effect engine', () => {
+  it('renders valid RGB tuples for every firmware effect 0..45', () => {
+    const sample = KEY_SAMPLE_POINTS[40]
+    const hit = [{ x: sample.x, y: sample.y, at: 0.8, keyIndex: sample.index }]
+    for (const effect of EFFECTS) {
+      const rgb = evaluateEffectRgb(
+        { brightness: 200, effect: effect.id, speed: 128, hue: 40, saturation: 230, value: 255 },
+        sample,
+        1.0,
+        hit,
+      )
+      expect(rgb).toHaveLength(3)
+      for (const ch of rgb) {
+        expect(Number.isFinite(ch)).toBe(true)
+        expect(ch).toBeGreaterThanOrEqual(0)
+        expect(ch).toBeLessThanOrEqual(255)
+      }
+    }
+  })
+
+  it('returns black for All Off (0), Close All (45), or zero brightness', () => {
+    const sample = KEY_SAMPLE_POINTS[0]
+    expect(evaluateEffectRgb({ brightness: 255, effect: 0, speed: 64, hue: 0, saturation: 255, value: 255 }, sample, 1)).toEqual([0, 0, 0])
+    expect(evaluateEffectRgb({ brightness: 255, effect: 45, speed: 64, hue: 0, saturation: 255, value: 255 }, sample, 1)).toEqual([0, 0, 0])
+    expect(evaluateEffectRgb({ brightness: 0, effect: 1, speed: 64, hue: 0, saturation: 255, value: 255 }, sample, 1)).toEqual([0, 0, 0])
+  })
+
+  it('animates spatial effects differently across keys and over time', () => {
+    const lighting = { brightness: 220, effect: 13, speed: 120, hue: 0, saturation: 255, value: 255 }
+    const leftAt0 = evaluateEffectRgb(lighting, KEY_SAMPLE_POINTS[0], 0)
+    const rightAt0 = evaluateEffectRgb(lighting, KEY_SAMPLE_POINTS[15], 0)
+    const leftAt1 = evaluateEffectRgb(lighting, KEY_SAMPLE_POINTS[0], 1.2)
+    expect(leftAt0).not.toEqual(rightAt0)
+    expect(leftAt0).not.toEqual(leftAt1)
+    const leftSide = buildSideSamplePoints('left')
+    const rightSide = buildSideSamplePoints('right')
+    expect(leftSide).toHaveLength(12)
+    expect(rightSide).toHaveLength(12)
+
+    // Channel 2 firmware readback often returns color value=0; side strip must still render visibly
+    const sideLighting = { brightness: 180, effect: 13, speed: 100, hue: 40, saturation: 255, value: 0 }
+    const sideTop = evaluateEffectRgb(sideLighting, leftSide[0], 0.5)
+    const sideBottom = evaluateEffectRgb(sideLighting, leftSide[11], 0.5)
+    expect(sideTop[0] + sideTop[1] + sideTop[2]).toBeGreaterThan(0)
+    expect(sideTop).not.toEqual(sideBottom)
   })
 })
 

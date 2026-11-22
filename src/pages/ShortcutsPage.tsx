@@ -54,9 +54,12 @@ export function ShortcutsPage() {
             why this app does not pretend to.
           </p>
           <p className="muted small">
-            If you need a Windows key without unlocking, a desktop remapper that maps Caps Lock to the
-            Windows key at OS level is the honest workaround. It is planned as the companion desktop
-            build for this app; the web page alone cannot do it.
+            If you need a Windows key without unlocking, the Windows companion app{' '}
+            <strong>WK87 Remap</strong> (included in <code>desktop/</code>) remaps{' '}
+            <kbd className="kbd">Caps Lock</kbd> → <kbd className="kbd">Win</kbd> at OS level (Win
+            Rescue), adds per-key remaps and Game Mode (<kbd className="kbd">Ctrl</kbd> +{' '}
+            <kbd className="kbd">Alt</kbd> + <kbd className="kbd">G</kbd>), and pauses all remaps if
+            you hold physical <kbd className="kbd">Esc</kbd> for 3 seconds.
           </p>
         </section>
 
