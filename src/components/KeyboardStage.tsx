@@ -1,11 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { effectById, type EffectFamily } from '../core/effects'
-import { hsvToCss } from '../core/colors'
+import { useCallback, useEffect, useRef } from 'react'
+import { effectById } from '../core/effects'
+import {
+  KEY_SAMPLE_POINTS,
+  SIDE_SEGMENTS,
+  buildSideSamplePoints,
+  evaluateEffectRgb,
+  type ReactiveHit,
+} from '../core/effectEngine'
 import { BOARD_KEYS, BOARD_UNITS } from '../core/layout'
 import type { LightingTarget } from '../core/protocol'
 import type { Lighting, ZoneLighting } from '../core/types'
 
-const ANIMATED_FAMILIES: ReadonlySet<EffectFamily> = new Set(['wave', 'breathe', 'rain', 'reactive'])
+const LEFT_SIDE_POINTS = buildSideSamplePoints('left')
+const RIGHT_SIDE_POINTS = buildSideSamplePoints('right')
 
 const ZONE_CAPTION: Record<LightingTarget, string> = {
   keys: 'Editing key backlight (channel 3). Side panel shows its own live state (channel 2).',
@@ -13,17 +20,17 @@ const ZONE_CAPTION: Record<LightingTarget, string> = {
   both: 'Editing both zones together. Each change is written to channel 3 and channel 2.',
 }
 
-function speedDurationSeconds(speed: number, family: EffectFamily): number {
-  const ratio = Math.max(0, Math.min(255, speed)) / 255
-  const base = family === 'breathe' ? 5.2 : family === 'rain' ? 3.2 : family === 'reactive' ? 3.8 : 4.2
-  const min = family === 'breathe' ? 1.1 : 0.75
-  return Number((base - ratio * (base - min)).toFixed(2))
-}
+const FRAME_INTERVAL_MS = 33 // ~30 fps: smooth motion, low CPU
+const MAX_HITS = 14
 
 function isLightingOff(lighting: Lighting, idle: boolean): boolean {
   if (idle) return true
   const effect = effectById(lighting.effect)
   return effect.family === 'off' || lighting.brightness === 0
+}
+
+function isInteractiveEffect(effectId: number): boolean {
+  return effectId === 31 || (effectId >= 33 && effectId <= 44)
 }
 
 interface KeyboardStageProps {
@@ -42,148 +49,225 @@ export function KeyboardStage({
   target = 'keys',
   showLegends = false,
 }: KeyboardStageProps) {
-  const [pulseOrigin, setPulseOrigin] = useState<{ x: number; y: number; tick: number } | null>(null)
-  const pulseTimer = useRef<number | null>(null)
+  const capRefs = useRef<Array<HTMLButtonElement | null>>([])
+  const leftLedRefs = useRef<Array<HTMLSpanElement | null>>([])
+  const rightLedRefs = useRef<Array<HTMLSpanElement | null>>([])
+  const leftStripRef = useRef<HTMLDivElement | null>(null)
+  const rightStripRef = useRef<HTMLDivElement | null>(null)
 
-  const keyLighting = zones.keys
-  const sideLighting = zones.side
-  const keyEffect = effectById(keyLighting.effect)
-  const sideEffect = effectById(sideLighting.effect)
+  const zonesRef = useRef<ZoneLighting>(zones)
+  const idleRef = useRef<boolean>(idle)
+  const hitsRef = useRef<ReactiveHit[]>([])
+  const lastUserHitAtRef = useRef<number>(-10)
+  const lastAutoHitAtRef = useRef<number>(-10)
+  const startTimeRef = useRef<number>(performance.now())
 
-  const keysOff = isLightingOff(keyLighting, idle)
-  const sideOff = isLightingOff(sideLighting, idle)
+  zonesRef.current = zones
+  idleRef.current = idle
+
+  const keyEffect = effectById(zones.keys.effect)
+  const sideEffect = effectById(zones.side.effect)
+  const keysOff = isLightingOff(zones.keys, idle)
+  const sideOff = isLightingOff(zones.side, idle)
   const keysTargeted = target !== 'side'
   const sideTargeted = target !== 'keys'
 
-  const triggerPulse = useCallback((x: number, y: number) => {
-    setPulseOrigin({ x, y, tick: Date.now() })
-    if (pulseTimer.current) window.clearTimeout(pulseTimer.current)
-    pulseTimer.current = window.setTimeout(() => {
-      pulseTimer.current = null
-      setPulseOrigin(null)
-    }, 650)
+  const pushHit = useCallback((keyIndex: number, isUser: boolean) => {
+    const point = KEY_SAMPLE_POINTS[keyIndex]
+    if (!point) return
+    const nowSec = (performance.now() - startTimeRef.current) / 1000
+    if (isUser) lastUserHitAtRef.current = nowSec
+    hitsRef.current = [
+      { x: point.x, y: point.y, at: nowSec, keyIndex },
+      ...hitsRef.current.filter((hit) => nowSec - hit.at < 5),
+    ].slice(0, MAX_HITS)
   }, [])
 
+  // Real keyboard presses drive reactive & heatmap effects directly on the preview
   useEffect(() => {
-    return () => {
-      if (pulseTimer.current) window.clearTimeout(pulseTimer.current)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (idle || keyEffect.family !== 'reactive') return
+    if (idle) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.repeat) return
       const tag = (event.target as HTMLElement | null)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       const match = BOARD_KEYS.find((item) => item.code === event.code)
-      if (match) triggerPulse(match.x + match.w / 2, match.y + 0.5)
+      if (match) pushHit(match.index, true)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [idle, keyEffect.family, triggerPulse])
+  }, [idle, pushHit])
 
-  const keyTone = useMemo(() => {
-    return (index: number, x: number, y: number) => {
-      if (keysOff) return 'rgba(255, 255, 255, 0.08)'
-      const value = Math.max(keyLighting.value, 55)
-      if (!keyEffect.usesColor) {
-        const hue = Math.round((x * 13 + y * 29 + index * 3) % 256)
-        return hsvToCss(hue, 215, value)
+  // Real-time per-key & side-strip lighting renderer
+  useEffect(() => {
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+    let rafId = 0
+    let lastDraw = 0
+
+    const paintFrame = (nowMs: number) => {
+      const timeSec = reducedMotion ? 1.2 : (nowMs - startTimeRef.current) / 1000
+      const currentIdle = idleRef.current
+      const currentZones = zonesRef.current
+      const currentKeysOff = isLightingOff(currentZones.keys, currentIdle)
+      const currentSideOff = isLightingOff(currentZones.side, currentIdle)
+
+      // Provide a gentle ambient demo hit for reactive/heatmap effects when the user
+      // hasn't pressed a key recently, so browsing all 46 effects shows each animation live.
+      if (
+        !currentIdle &&
+        !reducedMotion &&
+        (isInteractiveEffect(currentZones.keys.effect) || isInteractiveEffect(currentZones.side.effect))
+      ) {
+        if (timeSec - lastUserHitAtRef.current > 2.8 && timeSec - lastAutoHitAtRef.current > 1.25) {
+          lastAutoHitAtRef.current = timeSec
+          const demoIndex = Math.floor((timeSec * 19) % BOARD_KEYS.length)
+          pushHit(demoIndex, false)
+        }
       }
-      if (keyEffect.family === 'wave' && keyEffect.id >= 12 && keyEffect.id <= 22) {
-        const hue = Math.round((keyLighting.hue + x * 14 + y * 18) % 256)
-        return hsvToCss(hue, Math.max(keyLighting.saturation, 180), value)
+
+      const hits = hitsRef.current
+
+      // Paint 87 keycaps
+      for (let i = 0; i < KEY_SAMPLE_POINTS.length; i += 1) {
+        const el = capRefs.current[i]
+        if (!el) continue
+        if (currentKeysOff) {
+          el.style.backgroundColor = 'rgba(255, 255, 255, 0.08)'
+          el.style.boxShadow = 'inset 0 1px 0 rgba(255, 255, 255, 0.10)'
+          continue
+        }
+        const [r, g, b] = evaluateEffectRgb(currentZones.keys, KEY_SAMPLE_POINTS[i], timeSec, hits)
+        const lum = (r + g + b) / 765
+        const bg = `rgb(${r} ${g} ${b})`
+        el.style.backgroundColor = bg
+        el.style.boxShadow =
+          lum > 0.15
+            ? `inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 0 12px -4px rgb(${r} ${g} ${b} / 75%)`
+            : 'inset 0 1px 0 rgba(255, 255, 255, 0.10)'
       }
-      return hsvToCss(keyLighting.hue, keyLighting.saturation, value)
+
+      // Paint left & right side panel strips (channel 2)
+      const paintSide = (
+        points: typeof LEFT_SIDE_POINTS,
+        refs: Array<HTMLSpanElement | null>,
+        stripEl: HTMLDivElement | null,
+      ) => {
+        let sumR = 0
+        let sumG = 0
+        let sumB = 0
+        for (let i = 0; i < points.length; i += 1) {
+          const seg = refs[i]
+          if (!seg) continue
+          if (currentSideOff) {
+            seg.style.backgroundColor = 'rgba(255, 255, 255, 0.08)'
+            continue
+          }
+          const [r, g, b] = evaluateEffectRgb(currentZones.side, points[i], timeSec, hits)
+          sumR += r
+          sumG += g
+          sumB += b
+          seg.style.backgroundColor = `rgb(${r} ${g} ${b})`
+        }
+        if (stripEl) {
+          if (currentSideOff) {
+            stripEl.style.setProperty('--side-glow', 'transparent')
+          } else {
+            const avgR = Math.round(sumR / points.length)
+            const avgG = Math.round(sumG / points.length)
+            const avgB = Math.round(sumB / points.length)
+            stripEl.style.setProperty('--side-glow', `rgb(${avgR} ${avgG} ${avgB})`)
+          }
+        }
+      }
+
+      paintSide(LEFT_SIDE_POINTS, leftLedRefs.current, leftStripRef.current)
+      paintSide(RIGHT_SIDE_POINTS, rightLedRefs.current, rightStripRef.current)
     }
-  }, [keyEffect.family, keyEffect.id, keyEffect.usesColor, keyLighting.hue, keyLighting.saturation, keyLighting.value, keysOff])
 
-  const sideTone = useMemo(() => {
-    if (sideOff) return { background: 'rgba(255, 255, 255, 0.08)', glow: 'transparent' }
-    const value = Math.max(sideLighting.value, 55)
-    if (sideEffect.usesColor && !(sideEffect.family === 'wave' && sideEffect.id >= 12 && sideEffect.id <= 22)) {
-      const color = hsvToCss(sideLighting.hue, sideLighting.saturation, value)
-      return { background: color, glow: color }
+    const tick = (nowMs: number) => {
+      if (nowMs - lastDraw >= FRAME_INTERVAL_MS) {
+        lastDraw = nowMs
+        paintFrame(nowMs)
+      }
+      if (!reducedMotion) {
+        rafId = window.requestAnimationFrame(tick)
+      }
     }
-    const baseHue = sideEffect.usesColor ? sideLighting.hue : 0
-    const rainbow = `linear-gradient(180deg, ${hsvToCss(baseHue, 215, value)}, ${hsvToCss((baseHue + 85) % 256, 215, value)}, ${hsvToCss((baseHue + 170) % 256, 215, value)})`
-    return { background: rainbow, glow: hsvToCss((baseHue + 85) % 256, 215, value) }
-  }, [sideEffect.family, sideEffect.id, sideEffect.usesColor, sideLighting.hue, sideLighting.saturation, sideLighting.value, sideOff])
 
-  const keyFamily = keysOff ? 'off' : keyEffect.family
-  const keyAnimated = !keysOff && ANIMATED_FAMILIES.has(keyEffect.family)
-  const sideAnimated = !sideOff && ANIMATED_FAMILIES.has(sideEffect.family)
+    paintFrame(performance.now())
+    if (!reducedMotion) {
+      rafId = window.requestAnimationFrame(tick)
+    }
 
-  const keyLit = keysOff ? 0 : keyLighting.brightness / 255
-  const sideLit = sideOff ? 0 : sideLighting.brightness / 255
-  const boardOpacity = keysOff ? 0.55 : 0.48 + keyLit * 0.52
-  const sideOpacity = sideOff ? 0.3 : 0.32 + sideLit * 0.68
+    return () => {
+      if (rafId) window.cancelAnimationFrame(rafId)
+    }
+  }, [pushHit])
 
-  const keyDuration = `${speedDurationSeconds(keyLighting.speed, keyFamily)}s`
-  const sideDuration = `${speedDurationSeconds(sideLighting.speed, sideOff ? 'off' : sideEffect.family)}s`
-
-  const sidebar = (side: 'left' | 'right') => (
-    <span
-      className={`side-strip${sideOff ? '' : ' is-live'}${sideTargeted ? ' is-targeted' : ' is-secondary'}${sideAnimated ? ' is-animated' : ''}`}
-      aria-hidden="true"
-      style={{
-        background: sideTone.background,
-        opacity: sideOpacity,
-        ['--side-glow' as string]: sideTone.glow,
-        ['--anim-duration' as string]: sideDuration,
-      }}
-      data-side={side}
-    />
-  )
+  const renderStrip = (side: 'left' | 'right') => {
+    const refList = side === 'left' ? leftLedRefs : rightLedRefs
+    const stripRef = side === 'left' ? leftStripRef : rightStripRef
+    return (
+      <div
+        ref={stripRef}
+        className={`side-strip${sideOff ? '' : ' is-live'}${sideTargeted ? ' is-targeted' : ' is-secondary'}`}
+        aria-hidden="true"
+        data-side={side}
+      >
+        {Array.from({ length: SIDE_SEGMENTS }, (_, i) => (
+          <span
+            key={i}
+            ref={(el) => {
+              refList.current[i] = el
+            }}
+            className="side-led"
+          />
+        ))}
+      </div>
+    )
+  }
 
   return (
     <div className="stage">
       <div className="stage-frame">
-        {sidebar('left')}
+        {renderStrip('left')}
         <div
-          className={`board is-${keyFamily}${keyAnimated ? ' is-animated' : ''}${keysTargeted ? ' is-targeted' : ' is-secondary'}${showLegends ? ' has-legends' : ''}`}
-          style={{
-            opacity: boardOpacity,
-            ['--anim-duration' as string]: keyDuration,
-          }}
+          className={`board${keysOff ? ' is-off' : ''}${keysTargeted ? ' is-targeted' : ' is-secondary'}${showLegends ? ' has-legends' : ''}`}
         >
-          {BOARD_KEYS.map((cap) => {
-            const centerX = cap.x + cap.w / 2
-            const centerY = cap.y + 0.5
-            const dist = pulseOrigin
-              ? Math.hypot(centerX - pulseOrigin.x, centerY - pulseOrigin.y)
-              : null
-            const isPulsed = dist !== null && dist <= 3.6
-            return (
-              <button
-                key={cap.index}
-                type="button"
-                tabIndex={-1}
-                aria-hidden="true"
-                className={`board-cap${isPulsed ? ' is-pulsed' : ''}`}
-                onClick={() => triggerPulse(centerX, centerY)}
-                style={{
-                  left: `calc(${(cap.x / BOARD_UNITS.width) * 100}% + 1px)`,
-                  top: `calc(${(cap.y / BOARD_UNITS.height) * 100}% + 1px)`,
-                  width: `calc(${(cap.w / BOARD_UNITS.width) * 100}% - 2px)`,
-                  height: `calc(${(1 / BOARD_UNITS.height) * 100}% - 2px)`,
-                  ['--tone' as string]: keyTone(cap.index, cap.x, cap.y),
-                  ['--delay' as string]: `${(-(cap.x * 0.11 + cap.y * 0.19) % 2.6).toFixed(2)}s`,
-                  ['--pulse-delay' as string]: dist !== null ? `${Math.round(dist * 45)}ms` : '0ms',
-                }}
-              >
-                {showLegends ? <span className="cap-legend">{cap.label}</span> : null}
-              </button>
-            )
-          })}
+          {BOARD_KEYS.map((cap) => (
+            <button
+              key={cap.index}
+              ref={(el) => {
+                capRefs.current[cap.index] = el
+              }}
+              type="button"
+              tabIndex={-1}
+              aria-hidden="true"
+              className="board-cap"
+              onClick={() => pushHit(cap.index, true)}
+              style={{
+                left: `calc(${(cap.x / BOARD_UNITS.width) * 100}% + 1px)`,
+                top: `calc(${(cap.y / BOARD_UNITS.height) * 100}% + 1px)`,
+                width: `calc(${(cap.w / BOARD_UNITS.width) * 100}% - 2px)`,
+                height: `calc(${(1 / BOARD_UNITS.height) * 100}% - 2px)`,
+              }}
+            >
+              {showLegends ? <span className="cap-legend">{cap.label}</span> : null}
+            </button>
+          ))}
         </div>
-        {sidebar('right')}
+        {renderStrip('right')}
       </div>
       <p className="stage-caption">
         {idle
           ? 'No keyboard connected. The preview shows an unlit board.'
-          : `${ZONE_CAPTION[target]} Keys: ${keyEffect.name} · Side: ${sideEffect.name}. The physical keyboard is the source of truth; this preview only approximates the effect.`}
+          : `${ZONE_CAPTION[target]} Keys: ${keyEffect.name} · Side: ${sideEffect.name}.${
+              isInteractiveEffect(zones.keys.effect)
+                ? ' Type or click any key on the preview to trigger the reactive pattern.'
+                : ''
+            } The physical keyboard is the source of truth; this preview approximates the effect.`}
       </p>
     </div>
   )

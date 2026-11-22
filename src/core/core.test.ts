@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { COLOR_SWATCHES, hexToHsv, hsvToCss, hsvToHex, hueDegrees, rgbToHsv } from './colors'
 import { DemoClient } from './demo'
+import { KEY_SAMPLE_POINTS, buildSideSamplePoints, evaluateEffectRgb } from './effectEngine'
 import { EFFECTS, effectById } from './effects'
 import { keyLabel, locationName } from './keyLabels'
 import { BOARD_KEYS, BOARD_ROWS, BOARD_UNITS, KEY_COUNT, TESTABLE_CODES, TESTABLE_KEY_COUNT } from './layout'
@@ -185,6 +186,45 @@ describe('demo client', () => {
     expect(zones.side.effect).toBe(5)
     const latency = await demo.ping()
     expect(latency).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('effect engine', () => {
+  it('renders valid RGB tuples for every firmware effect 0..45', () => {
+    const sample = KEY_SAMPLE_POINTS[40]
+    const hit = [{ x: sample.x, y: sample.y, at: 0.8, keyIndex: sample.index }]
+    for (const effect of EFFECTS) {
+      const rgb = evaluateEffectRgb(
+        { brightness: 200, effect: effect.id, speed: 128, hue: 40, saturation: 230, value: 255 },
+        sample,
+        1.0,
+        hit,
+      )
+      expect(rgb).toHaveLength(3)
+      for (const ch of rgb) {
+        expect(Number.isFinite(ch)).toBe(true)
+        expect(ch).toBeGreaterThanOrEqual(0)
+        expect(ch).toBeLessThanOrEqual(255)
+      }
+    }
+  })
+
+  it('returns black for All Off (0), Close All (45), or zero brightness', () => {
+    const sample = KEY_SAMPLE_POINTS[0]
+    expect(evaluateEffectRgb({ brightness: 255, effect: 0, speed: 64, hue: 0, saturation: 255, value: 255 }, sample, 1)).toEqual([0, 0, 0])
+    expect(evaluateEffectRgb({ brightness: 255, effect: 45, speed: 64, hue: 0, saturation: 255, value: 255 }, sample, 1)).toEqual([0, 0, 0])
+    expect(evaluateEffectRgb({ brightness: 0, effect: 1, speed: 64, hue: 0, saturation: 255, value: 255 }, sample, 1)).toEqual([0, 0, 0])
+  })
+
+  it('animates spatial effects differently across keys and over time', () => {
+    const lighting = { brightness: 220, effect: 13, speed: 120, hue: 0, saturation: 255, value: 255 }
+    const leftAt0 = evaluateEffectRgb(lighting, KEY_SAMPLE_POINTS[0], 0)
+    const rightAt0 = evaluateEffectRgb(lighting, KEY_SAMPLE_POINTS[15], 0)
+    const leftAt1 = evaluateEffectRgb(lighting, KEY_SAMPLE_POINTS[0], 1.2)
+    expect(leftAt0).not.toEqual(rightAt0)
+    expect(leftAt0).not.toEqual(leftAt1)
+    expect(buildSideSamplePoints('left')).toHaveLength(8)
+    expect(buildSideSamplePoints('right')).toHaveLength(8)
   })
 })
 
