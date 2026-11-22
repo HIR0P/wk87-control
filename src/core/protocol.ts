@@ -1,4 +1,4 @@
-import type { DeviceDescriptor, Lighting, Transport } from './types'
+import type { DeviceDescriptor, Lighting, Transport, ZoneLighting } from './types'
 
 export const VENDOR_ID = 0x342d
 export const PRODUCT_ID = 0xe406
@@ -97,7 +97,11 @@ export interface LightingClient {
   readonly descriptor: DeviceDescriptor
   /** Reads one zone; "both" reads the keys channel because that is the anchor. */
   readLighting(target?: LightingTarget): Promise<Lighting>
+  /** Reads both verified lighting channels (3 = keys, 2 = side panel). */
+  readAllZones(): Promise<ZoneLighting>
   writeLighting(target: LightingTarget, patch: Partial<Lighting>): Promise<void>
+  /** Sends a read-only 0x01 protocol handshake and returns round-trip latency in ms. */
+  ping(): Promise<number>
   close(): Promise<void>
 }
 
@@ -336,11 +340,25 @@ export class Wk87Client implements LightingClient {
   readLighting = (target: LightingTarget = 'keys'): Promise<Lighting> =>
     this.enqueue(() => this.readChannel(channelsFor(target)[0]))
 
+  readAllZones = (): Promise<ZoneLighting> =>
+    this.enqueue(async () => {
+      const keys = await this.readChannel(LIGHTING_CHANNELS.keys)
+      const side = await this.readChannel(LIGHTING_CHANNELS.side)
+      return { keys, side }
+    })
+
   writeLighting = (target: LightingTarget, patch: Partial<Lighting>): Promise<void> =>
     this.enqueue(async () => {
       for (const channel of channelsFor(target)) {
         await this.writeChannel(channel, patch)
       }
+    })
+
+  ping = (): Promise<number> =>
+    this.enqueue(async () => {
+      const started = performance.now()
+      await this.command(CMD.GET_PROTOCOL_VERSION)
+      return Math.max(0, Math.round(performance.now() - started))
     })
 
   close = async (): Promise<void> => {

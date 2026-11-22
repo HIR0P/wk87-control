@@ -24,6 +24,11 @@ export interface Lighting {
   value: number
 }
 
+export interface ZoneLighting {
+  keys: Lighting
+  side: Lighting
+}
+
 export interface DeviceDescriptor {
   productName: string
   vendorId: number
@@ -41,4 +46,18 @@ export const DEFAULT_LIGHTING: Lighting = {
   hue: 0,
   saturation: 255,
   value: 255,
+}
+
+export const DEFAULT_SIDE_LIGHTING: Lighting = {
+  brightness: 180,
+  effect: 14,
+  speed: 64,
+  hue: 85,
+  saturation: 255,
+  value: 255,
+}
+
+export const DEFAULT_ZONE_LIGHTING: ZoneLighting = {
+  keys: { ...DEFAULT_LIGHTING },
+  side: { ...DEFAULT_SIDE_LIGHTING },
 }
