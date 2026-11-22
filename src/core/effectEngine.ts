@@ -25,6 +25,8 @@ export interface SamplePoint {
   ny: number
   /** True for modifiers / non-alpha keys (used by Alphas Mods). */
   isMod: boolean
+  /** True for vertical side-panel diffuser LEDs (channel 2). */
+  isSideStrip?: boolean
 }
 
 const CENTER_X = BOARD_UNITS.width / 2
@@ -96,7 +98,7 @@ export function toSamplePoint(cap: BoardKey): SamplePoint {
 
 export const KEY_SAMPLE_POINTS: ReadonlyArray<SamplePoint> = BOARD_KEYS.map(toSamplePoint)
 
-export const SIDE_SEGMENTS = 8
+export const SIDE_SEGMENTS = 12
 
 export function buildSideSamplePoints(side: 'left' | 'right'): SamplePoint[] {
   const x = side === 'left' ? 0.3 : BOARD_UNITS.width - 0.3
@@ -109,7 +111,8 @@ export function buildSideSamplePoints(side: 'left' | 'right'): SamplePoint[] {
       y: ny * BOARD_UNITS.height,
       nx,
       ny,
-      isMod: true,
+      isMod: i % 2 === 1,
+      isSideStrip: true,
     }
   })
 }
@@ -213,15 +216,25 @@ export function evaluateEffectRgb(
   const baseH = clamp(lighting.hue, 0, 255)
   const baseS = clamp(lighting.saturation, 0, 255)
   const baseV = clamp(lighting.value, 0, 255)
-  // Keep preview visibly lit when brightness > 0 even at modest levels
-  const vScale = (0.2 + 0.8 * brightnessScale) * (baseV / 255)
+  // VIA/QMK color GET_VALUE (id 4) only sends 2 bytes [hue, sat], leaving value=0
+  // on firmware readback (especially on channel 2 side panel). Treat 0 as full V
+  // while brightness (id 1) controls overall luminance.
+  const effectiveV = baseV === 0 ? 255 : Math.max(baseV, 55)
+  const vScale = (0.22 + 0.78 * brightnessScale) * (effectiveV / 255)
   const spd = speedFactor(lighting.speed)
   const phase = timeSec * spd
 
+  // On vertical side-panel strips, map horizontal-axis effects along the strip length (ny)
+  // so every wave/band/gradient visibly flows along the diffuser instead of staying flat.
+  const axisX = point.isSideStrip ? point.ny : point.nx
+  const colPos = point.isSideStrip ? point.ny * BOARD_UNITS.width : point.x
+
   const dx = point.x - CENTER_X
   const dy = point.y - CENTER_Y
-  const dist = Math.hypot(dx, dy)
-  const angle = Math.atan2(dy, dx) // -PI..PI
+  const dist = point.isSideStrip ? Math.abs(point.ny - 0.5) * MAX_DIST * 1.4 : Math.hypot(dx, dy)
+  const angle = point.isSideStrip
+    ? (point.ny * 2 - 1) * Math.PI + (point.nx > 0.5 ? Math.PI : 0)
+    : Math.atan2(dy, dx)
   const angleByte = ((angle + Math.PI) / (2 * Math.PI)) * 256
 
   let h = baseH
@@ -241,7 +254,7 @@ export function evaluateEffectRgb(
       break
 
     case 4: // Gradient Left Right
-      h = wrap256(baseH + point.nx * 92)
+      h = wrap256(baseH + axisX * 92)
       break
 
     case 5: {
@@ -254,7 +267,7 @@ export function evaluateEffectRgb(
     case 6: {
       // Band Sat
       const bandPos = ((phase * 0.45) % 1.4) - 0.2
-      const band = clamp(1 - Math.abs(point.nx - bandPos) * 4.2, 0, 1)
+      const band = clamp(1 - Math.abs(axisX - bandPos) * 4.2, 0, 1)
       s = baseS * (1 - band * 0.9)
       break
     }
@@ -262,7 +275,7 @@ export function evaluateEffectRgb(
     case 7: {
       // Band Val
       const bandPos = ((phase * 0.45) % 1.4) - 0.2
-      const band = clamp(1 - Math.abs(point.nx - bandPos) * 4.2, 0, 1)
+      const band = clamp(1 - Math.abs(axisX - bandPos) * 4.2, 0, 1)
       v = (32 + 223 * band) * vScale
       break
     }
@@ -300,7 +313,7 @@ export function evaluateEffectRgb(
       break
 
     case 13: // Cycle Left Right
-      h = wrap256(baseH + point.nx * 256 - phase * 72)
+      h = wrap256(baseH + axisX * 256 - phase * 72)
       break
 
     case 14: // Cycle Up Down
@@ -309,7 +322,7 @@ export function evaluateEffectRgb(
 
     case 15: {
       // Rainbow Moving Chevron
-      const chevron = point.nx - Math.abs(point.ny - 0.5) * 0.85
+      const chevron = axisX - Math.abs(point.ny - 0.5) * 0.85
       h = wrap256(baseH + chevron * 220 - phase * 78)
       break
     }
@@ -355,7 +368,7 @@ export function evaluateEffectRgb(
       // Rainbow Pinwheels
       const a1 = Math.atan2(dy, point.x - BOARD_UNITS.width * 0.3)
       const a2 = Math.atan2(dy, point.x - BOARD_UNITS.width * 0.7)
-      const chosen = point.nx < 0.5 ? a1 : -a2
+      const chosen = point.isSideStrip ? angle : point.nx < 0.5 ? a1 : -a2
       h = wrap256(baseH + ((chosen + Math.PI) / (2 * Math.PI)) * 256 - phase * 74)
       break
     }
@@ -388,21 +401,21 @@ export function evaluateEffectRgb(
     case 26: {
       // Hue Pendulum
       const swing = Math.sin(phase * Math.PI) * 0.5 + 0.5
-      const delta = (point.nx - swing) * 48
+      const delta = (axisX - swing) * 48
       h = wrap256(baseH + delta)
       break
     }
 
     case 27: {
       // Hue Wave
-      const wave = Math.sin(point.nx * Math.PI * 2 - phase * 2.4) * 32
+      const wave = Math.sin(axisX * Math.PI * 2 - phase * 2.4) * 32
       h = wrap256(baseH + wave)
       break
     }
 
     case 28: {
       // Pixel Rain (multi-color falling drops)
-      const col = Math.floor(point.x)
+      const col = point.isSideStrip ? (point.nx < 0.5 ? 1 : 2) : Math.floor(colPos)
       const colPhase = phase * 3.4 + hash01(col * 19 + 5) * 10
       const dropY = colPhase % 8.5
       const trail = dropY - point.y
@@ -417,7 +430,7 @@ export function evaluateEffectRgb(
     case 29: {
       // Pixel Flow (scrolling vibrant cells)
       const step = Math.floor(phase * 3.2)
-      const cellX = Math.floor(point.x) + step
+      const cellX = Math.floor(colPos) + step
       const cellY = Math.floor(point.y)
       const seed = cellX * 37 + cellY * 131
       h = hash01(seed) * 256
@@ -429,7 +442,7 @@ export function evaluateEffectRgb(
     case 30: {
       // Pixel Fractal (mirrored geometric pulse)
       const step = Math.floor(phase * 2.6)
-      const symX = Math.floor(Math.abs(point.x - CENTER_X))
+      const symX = Math.floor(Math.abs(colPos - CENTER_X))
       const symY = Math.floor(point.y)
       const lit = ((symX ^ symY ^ step) & 3) === 0 || hash01(symX * 41 + symY * 13 + step * 7) > 0.62
       v = (lit ? 240 : 28) * vScale
@@ -443,7 +456,9 @@ export function evaluateEffectRgb(
       for (const hit of hits) {
         const age = timeSec - hit.at
         if (age < 0 || age > 4.5) continue
-        const d = Math.hypot(point.x - hit.x, point.y - hit.y)
+        const d = point.isSideStrip
+          ? Math.abs(point.y - hit.y)
+          : Math.hypot(point.x - hit.x, point.y - hit.y)
         if (d < 2.6) {
           heat += (1 - age / 4.5) * (1 - d / 2.6) * 0.95
         }
@@ -463,7 +478,7 @@ export function evaluateEffectRgb(
 
     case 32: {
       // Digital Rain (Matrix green columns)
-      const col = Math.floor(point.x)
+      const col = point.isSideStrip ? (point.nx < 0.5 ? 3 : 7) : Math.floor(colPos)
       const colSpeed = 2.6 + hash01(col * 23 + 1) * 1.8
       const dropPos = (phase * colSpeed + hash01(col * 71 + 9) * 12) % 9.5
       const trail = dropPos - point.y
@@ -484,6 +499,34 @@ export function evaluateEffectRgb(
 
     default: {
       // Reactive effects 33..44
+      if (point.isSideStrip) {
+        // Side strip reactive fallback: pulse vertically from recent hits or gently breathe
+        let local = 0
+        let shift = 0
+        for (const hit of hits.slice(0, 4)) {
+          const age = timeSec - hit.at
+          if (age < 0 || age > 1.8) continue
+          const life = clamp(1 - age / 1.8, 0, 1)
+          const dyHit = Math.abs(point.y - hit.y)
+          const pulse = life * clamp(1 - dyHit / 3.5, 0, 1)
+          if (pulse > local) {
+            local = pulse
+            shift = (dyHit * 28 + age * 120) % 256
+          }
+        }
+        if (effect === 34) {
+          h = wrap256(baseH + local * 110)
+          v = (155 + 100 * local) * vScale
+        } else if (effect === 41 || effect === 42) {
+          h = wrap256(baseH + shift)
+          s = 240
+          v = (32 + 223 * local) * vScale
+        } else {
+          v = (32 + 223 * local) * vScale
+        }
+        break
+      }
+
       const { intensity, hueShift } = reactivePulse(point, timeSec, hits, effect, spd)
       if (effect === 34) {
         // Solid Reactive: stays lit in base color, shifts hue on press

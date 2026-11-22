@@ -223,8 +223,17 @@ describe('effect engine', () => {
     const leftAt1 = evaluateEffectRgb(lighting, KEY_SAMPLE_POINTS[0], 1.2)
     expect(leftAt0).not.toEqual(rightAt0)
     expect(leftAt0).not.toEqual(leftAt1)
-    expect(buildSideSamplePoints('left')).toHaveLength(8)
-    expect(buildSideSamplePoints('right')).toHaveLength(8)
+    const leftSide = buildSideSamplePoints('left')
+    const rightSide = buildSideSamplePoints('right')
+    expect(leftSide).toHaveLength(12)
+    expect(rightSide).toHaveLength(12)
+
+    // Channel 2 firmware readback often returns color value=0; side strip must still render visibly
+    const sideLighting = { brightness: 180, effect: 13, speed: 100, hue: 40, saturation: 255, value: 0 }
+    const sideTop = evaluateEffectRgb(sideLighting, leftSide[0], 0.5)
+    const sideBottom = evaluateEffectRgb(sideLighting, leftSide[11], 0.5)
+    expect(sideTop[0] + sideTop[1] + sideTop[2]).toBeGreaterThan(0)
+    expect(sideTop).not.toEqual(sideBottom)
   })
 })
 

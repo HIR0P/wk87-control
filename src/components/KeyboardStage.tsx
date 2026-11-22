@@ -162,6 +162,7 @@ export function KeyboardStage({
           if (!seg) continue
           if (currentSideOff) {
             seg.style.backgroundColor = 'rgba(255, 255, 255, 0.08)'
+            seg.style.boxShadow = 'none'
             continue
           }
           const [r, g, b] = evaluateEffectRgb(currentZones.side, points[i], timeSec, hits)
@@ -169,6 +170,7 @@ export function KeyboardStage({
           sumG += g
           sumB += b
           seg.style.backgroundColor = `rgb(${r} ${g} ${b})`
+          seg.style.boxShadow = `0 0 10px 1px rgb(${r} ${g} ${b} / 65%)`
         }
         if (stripEl) {
           if (currentSideOff) {

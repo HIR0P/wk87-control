@@ -496,45 +496,53 @@ button.link-quiet {
 }
 
 .side-strip {
-  flex: 0 0 11px;
+  flex: 0 0 14px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
   padding: 2px;
   border-radius: 999px;
-  background: rgb(255 255 255 / 6%);
+  background: rgb(255 255 255 / 7%);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 14%);
   overflow: hidden;
+  cursor: pointer;
   transition: box-shadow 0.25s ease;
 }
 
 .side-led {
   flex: 1 1 0;
-  border-radius: 999px;
   background: rgb(255 255 255 / 8%);
 }
 
+.side-led:first-child {
+  border-radius: 999px 999px 0 0;
+}
+
+.side-led:last-child {
+  border-radius: 0 0 999px 999px;
+}
+
 .side-strip.is-secondary {
-  filter: saturate(0.88);
+  filter: saturate(0.92);
 }
 
 .side-strip.is-targeted {
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 26%),
-    0 0 0 1px rgb(255 255 255 / 22%);
+    0 0 0 1.5px rgb(255 255 255 / 32%);
 }
 
 .side-strip.is-live {
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 28%),
-    0 0 24px -4px var(--side-glow, var(--accent));
+    0 0 26px -2px var(--side-glow, var(--accent));
 }
 
 .side-strip.is-live.is-targeted {
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 34%),
-    0 0 0 1px rgb(255 255 255 / 30%),
-    0 0 26px -3px var(--side-glow, var(--accent));
+    0 0 0 1.5px rgb(255 255 255 / 38%),
+    0 0 28px -1px var(--side-glow, var(--accent));
 }
 
 .board {
